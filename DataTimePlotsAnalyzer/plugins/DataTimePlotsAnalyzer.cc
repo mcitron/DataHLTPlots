@@ -37,6 +37,7 @@
 #include "HLTrigger/HLTcore/interface/HLTFilter.h"
 #include "DataFormats/Common/interface/TriggerResults.h"
 
+#include "DataFormats/MuonReco/interface/MuonRecHitCluster.h"
 #include "FWCore/Framework/interface/Event.h"
 #include "FWCore/Framework/interface/MakerMacros.h"
 
@@ -45,6 +46,7 @@
 
 #include "DataFormats/HLTReco/interface/TriggerFilterObjectWithRefs.h"
 #include "TH2.h"
+#include "TTree.h"
 //
 // class declaration
 //
@@ -64,9 +66,7 @@ public:
   static void fillDescriptions(edm::ConfigurationDescriptions& descriptions);
 
 private:
-  void beginJob() override;
   void analyze(const edm::Event&, const edm::EventSetup&) override;
-  void endJob() override;
 
     edm::InputTag jetLabel_;
     edm::InputTag jetTimeLabel_;
@@ -75,9 +75,11 @@ private:
     std::string triggerString_;
     edm::EDGetTokenT<reco::CaloJetCollection> jetInputToken;
     edm::EDGetTokenT<edm::ValueMap<float>> jetTimesInputToken;
-    edm::EDGetTokenT<edm::ValueMap<int>> jetCellsInputToken;
+    edm::EDGetTokenT<edm::ValueMap<unsigned int>> jetCellsInputToken;
     edm::EDGetTokenT<edm::ValueMap<float>> jetEmInputToken;
-    edm::Service<TFileService> fs;
+    edm::EDGetTokenT<reco::MuonRecHitClusterCollection> clusterToken;
+    bool triggerFired;
+    TH1D * triggerFiredHist;
     TH1D * timeHist;
     TH1D * timeHistHighHad;
     TH1D * maxTimeHist;
@@ -88,7 +90,28 @@ private:
     TH2D * timeVsJetEmHist;
     TH2D * timeVsJetCellsHist;
     TH2D * timeVsJetEtaHist;
+    TTree * timeTree;
+    unsigned int event_i = 0;
+    unsigned int run_i = 0;
+    unsigned int lumi_i = 0;
+    unsigned int era_i = 0;
+    unsigned int bx_i = 0;
+    unsigned int store_i = 0;
+    unsigned int orbit_i = 0;
     edm::EDGetTokenT<edm::TriggerResults> triggerResultsToken;
+    std::vector<int> * 	v_dtClusterSize= new std::vector<int>();
+    std::vector<double> * 	v_dtClusterMB1 = new std::vector<double>();
+    std::vector<double> * 	v_dtClusterMB2 = new std::vector<double>();
+    std::vector<double> * 	v_dtClusterEta = new std::vector<double>();
+    std::vector<double> * 	v_dtClusterPhi = new std::vector<double>();
+    std::vector<double> * 	v_caloJetHLTPt= new std::vector<double>();
+    std::vector<double> * 	v_caloJetHLTEta= new std::vector<double>();
+    std::vector<double> *   v_caloJetHLTPhi= new std::vector<double>();
+    std::vector<double> *   v_caloJetHLTE= new std::vector<double>();
+    std::vector<double> *   v_caloJetHLTEcalTime= new std::vector<double>();
+    std::vector<double> *   v_caloJetHLTEcalE= new std::vector<double>();
+    std::vector<int> *   v_caloJetHLTEcalCells= new std::vector<int>();
+    std::map<const TString, bool> delayedJetHLT;
 };
 
 //
@@ -104,6 +127,7 @@ private:
 //
 DataTimePlotsAnalyzer::DataTimePlotsAnalyzer(const edm::ParameterSet& iConfig)
 { 
+    edm::Service<TFileService> fs;
     jetLabel_= iConfig.getParameter<edm::InputTag>("jets");
     jetTimeLabel_= iConfig.getParameter<edm::InputTag>("jetTimes");
     jetCellsLabel_= iConfig.getParameter<edm::InputTag>("jetCells");
@@ -111,8 +135,10 @@ DataTimePlotsAnalyzer::DataTimePlotsAnalyzer(const edm::ParameterSet& iConfig)
     triggerString_ = iConfig.getParameter<std::string>("triggerString");
     jetInputToken = consumes<std::vector<reco::CaloJet>>(jetLabel_);
     jetTimesInputToken = consumes<edm::ValueMap<float>>(jetTimeLabel_);
-    jetCellsInputToken = consumes<edm::ValueMap<int>>(jetCellsLabel_);
+    jetCellsInputToken = consumes<edm::ValueMap<unsigned int>>(jetCellsLabel_);
     jetEmInputToken = consumes<edm::ValueMap<float>>(jetEmLabel_);
+    clusterToken = consumes<reco::MuonRecHitClusterCollection>(iConfig.getParameter<edm::InputTag>("ClusterTag"));
+    triggerFired = fs->make<TH1D>("triggerFired","",2,0,2);
     timeHist = fs->make<TH1D>("jetTimeHist","",200,-25,25);
     timeHistHighHad = fs->make<TH1D>("jetTimeHistHighHad","",200,-25,25);
     maxTimeHist = fs->make<TH1D>("maxJetTimeHist","",200,-25,25);
@@ -124,6 +150,46 @@ DataTimePlotsAnalyzer::DataTimePlotsAnalyzer(const edm::ParameterSet& iConfig)
     timeVsJetCellsHist = fs->make<TH2D>("jetTimeVsnCellsHist","",200,-25,25,100,0,100);
     timeVsJetEmHist = fs->make<TH2D>("jetTimeVsEmHist","",200,-25,25,200,0,200);
     triggerResultsToken = consumes<edm::TriggerResults>(edm::InputTag("TriggerResults","","HLTX"));
+    std::vector<std::string> delayedJetStrings = {"HLT_HT425",
+      "HLT_HT430_DelayedJet40_DoubleDelay0p5nsTrackless",
+      "HLT_HT430_DelayedJet40_DoubleDelay1nsInclusive",
+      "HLT_HT430_DelayedJet40_DoubleDelay0nsInclusive",
+      "HLT_HT430_DelayedJet40_SingleDelay1nsTrackless",
+      "HLT_HT430_DelayedJet40_SingleDelay2nsInclusive",
+      "HLT_HT430_DelayedJet40_SingleDelay1nsInclusive",
+      "HLT_L1MET_DTCluster50",
+      "HLT_L1MET_DTClusterNoMB1S50",
+      "HLT_CaloMET60_DTCluster50",
+      "HLT_CaloMET60_DTClusterNoMB1S50",
+      "HLT_PFMET100_PFMHT100_IDTight_PFHT60","HLT_PFMETNoMu100_PFMHTNoMu100_IDTight_PFHT60","HLT_CaloMET90_NotCleaned"
+    };
+    for (auto delayedJetHLTIt = delayedJetStrings.begin(); delayedJetHLTIt != delayedJetStrings.end(); delayedJetHLTIt++){
+        delayedJetHLT[*delayedJetHLTIt] = false;
+    }   
+    timeTree = fs->make<TTree>("timeTree","timeTree");
+    timeTree->Branch("triggerFired",&triggerFired,"triggerFired/O");
+    timeTree->Branch("caloJetHLT_pt",             &v_caloJetHLTPt);
+    timeTree->Branch("caloJetHLT_eta",             &v_caloJetHLTEta);
+    timeTree->Branch("caloJetHLT_phi",            &v_caloJetHLTPhi);
+    timeTree->Branch("caloJetHLT_e",               &v_caloJetHLTE);
+    timeTree->Branch("caloJetHLT_ecalE",               &v_caloJetHLTEcalE);
+    timeTree->Branch("caloJetHLT_ecalCells",               &v_caloJetHLTEcalCells);
+    timeTree->Branch("caloJetHLT_ecalTime",               &v_caloJetHLTEcalTime);
+    timeTree->Branch("dtClusterSize",&v_dtClusterSize);
+    timeTree->Branch("dtClusterMB1",&v_dtClusterMB1);
+    timeTree->Branch("dtClusterMB2",&v_dtClusterMB2);
+    timeTree->Branch("dtClusterEta",&v_dtClusterEta);
+    timeTree->Branch("dtClusterPhi",&v_dtClusterPhi);
+    timeTree->Branch("event",&event_i,"event/i");
+    timeTree->Branch("lumi",&lumi_i,"lumi/i");
+    timeTree->Branch("era",&era_i,"era/i");
+    timeTree->Branch("bx",&bx_i,"bx/i");
+    timeTree->Branch("store",&store_i,"store/i");
+    timeTree->Branch("orbit",&orbit_i,"orbit/i");
+    timeTree->Branch("run",&run_i,"run/i");
+    for (auto iDelayedJetHLT = delayedJetHLT.begin(); iDelayedJetHLT != delayedJetHLT.end(); iDelayedJetHLT++){
+        timeTree->Branch(iDelayedJetHLT->first,&iDelayedJetHLT->second,iDelayedJetHLT->first+"/O");
+    }
   //now do what ever initialization is needed
 }
 
@@ -141,14 +207,52 @@ DataTimePlotsAnalyzer::~DataTimePlotsAnalyzer() {
 // ------------ method called for each event  ------------
 void DataTimePlotsAnalyzer::analyze(const edm::Event& iEvent, const edm::EventSetup& iSetup) {
   using namespace edm;
+    v_caloJetHLTPt->clear();
+    v_caloJetHLTEta->clear();
+    v_caloJetHLTPhi->clear();
+    v_caloJetHLTE->clear();
+    v_caloJetHLTEcalTime->clear();
+    v_caloJetHLTEcalCells->clear();
+    v_caloJetHLTEcalE->clear();
+    v_dtClusterSize->clear();
+    v_dtClusterMB1->clear();
+    v_dtClusterMB2->clear();
+    v_dtClusterEta->clear();
+    v_dtClusterPhi->clear();
+    for (auto iDelayedJetHLT = delayedJetHLT.begin(); iDelayedJetHLT != delayedJetHLT.end(); iDelayedJetHLT++){
+        iDelayedJetHLT->second = false;
+    }
+    lumi_i = 0;
+    run_i = 0;
+    event_i = 0;
+    bx_i = 0;
+    store_i = 0;
+    orbit_i = 0;
+
+    std::unique_ptr<unsigned int >  run   ( new unsigned int(iEvent.id().run()        ) );
+    std::unique_ptr<unsigned int >  event ( new unsigned int(iEvent.id().event()      ) );
+    std::unique_ptr<unsigned int >  lumi    ( new unsigned int(iEvent.luminosityBlock() ) );
+    std::unique_ptr<unsigned int >  bx    ( new unsigned int(iEvent.bunchCrossing() ) );
+    std::unique_ptr<unsigned int >  store    ( new unsigned int(iEvent.eventAuxiliary().storeNumber() ) );
+    std::unique_ptr<unsigned int >  orbit    ( new unsigned int(iEvent.orbitNumber() ) );
+
+    lumi_i = *lumi;
+    run_i = *run;
+    event_i = *event;
+    bx_i = *bx;
+    store_i = *store;
+    orbit_i = *orbit;
+
     edm::Handle<reco::CaloJetCollection> jets;
     iEvent.getByToken(jetInputToken, jets);
-    edm::Handle<edm::ValueMap<float>> jetTimes;
-    iEvent.getByToken(jetTimesInputToken, jetTimes);
-    edm::Handle<edm::ValueMap<int>> jetCells;
-    iEvent.getByToken(jetCellsInputToken, jetCells);
-    edm::Handle<edm::ValueMap<float>> jetEm;
-    iEvent.getByToken(jetEmInputToken, jetEm);
+    auto const& jetTimes = iEvent.get(jetTimesInputToken);
+    auto const& jetCells = iEvent.get(jetCellsInputToken);
+    auto const& jetEm = iEvent.get(jetEmInputToken);
+    auto const& rechitClusters = iEvent.get(clusterToken);
+    // edm::Handle<edm::ValueMap<int>> jetCells;
+    // iEvent.getByToken(jetCellsInputToken, jetCells);
+    // edm::Handle<edm::ValueMap<float>> jetEm;
+    // iEvent.getByToken(jetEmInputToken, jetEm);
     Handle<edm::TriggerResults> triggerResults; //our trigger result object
     iEvent.getByToken(triggerResultsToken, triggerResults);
     unsigned int njets = 0;
@@ -156,60 +260,100 @@ void DataTimePlotsAnalyzer::analyze(const edm::Event& iEvent, const edm::EventSe
     double maxTimeHad = -25.;
     double secondTime = -25.;
     double secondTimeHad = -25.;
-    int ijet = 0;
-    bool trigger = false;
     if (triggerResults.isValid()) {
 	const edm::TriggerNames & triggerNames = iEvent.triggerNames(*triggerResults);
 	for (unsigned int i = 0; i < triggerResults->size(); ++i) {
 	    const auto &trigname = triggerNames.triggerName(i);
-	    if (trigname.find(triggerString_ + "_v") != std::string::npos) {
-		trigger   = triggerResults->accept(i);
+	    // if (trigname.find(triggerString_ + "_v") != std::string::npos) {
+		// triggerFired   = triggerResults->accept(i);
+	    // }
+	    for (auto iDelayedJetHLT = delayedJetHLT.begin(); iDelayedJetHLT != delayedJetHLT.end(); iDelayedJetHLT++){
+                if (trigname.find(iDelayedJetHLT->first + "_v") != std::string::npos)   iDelayedJetHLT->second   = triggerResults->accept(i);
 	    }
-	}
-	if (trigger){
-	    for (auto const& c : *jets) {
-		reco::CaloJetRef calojetref(jets, ijet);
-		timeHist->Fill((*jetTimes)[calojetref]);
-		if (maxTime < (*jetTimes)[calojetref]) {
-		    secondTime = maxTime;
-		    maxTime = (*jetTimes)[calojetref];
-		}
-		else if (secondTime < (*jetTimes)[calojetref]){
-		    secondTime = (*jetTimes)[calojetref];
-		}
-		if (c.energy()*c.energyFractionHadronic() > 20) {
-		    timeHistHighHad->Fill((*jetTimes)[calojetref]);
-		    if (maxTimeHad < (*jetTimes)[calojetref]) {
-			secondTimeHad = maxTimeHad;
-			maxTimeHad = (*jetTimes)[calojetref];
-		    }
-		    else if (secondTimeHad < (*jetTimes)[calojetref]){
-			secondTimeHad = (*jetTimes)[calojetref];
-		    }
-			
-		}
-		timeVsJetPtHist->Fill((*jetTimes)[calojetref],c.pt());
-		timeVsJetEmHist->Fill((*jetTimes)[calojetref],(*jetEm)[calojetref]);
-		timeVsJetCellsHist->Fill((*jetTimes)[calojetref],(*jetCells)[calojetref]);
-		timeVsJetEtaHist->Fill((*jetTimes)[calojetref],c.eta());
-		ijet++;
-	    }
-	    maxTimeHist->Fill(maxTime);
-	    maxTimeHistHighHad->Fill(maxTimeHad);
-	    secondTimeHist->Fill(secondTime);
-	    secondTimeHistHighHad->Fill(secondTimeHad);
 	}
     }
-}
-
-// ------------ method called once each job just before starting event loop  ------------
-void DataTimePlotsAnalyzer::beginJob() {
-    // please remove this method if not needed
-}
-
-// ------------ method called once each job just after ending the event loop  ------------
-void DataTimePlotsAnalyzer::endJob() {
-    // please remove this method if not needed
+    for (auto const& cluster : rechitClusters) {
+	v_dtClusterSize->push_back(cluster.size());
+	v_dtClusterMB1->push_back(cluster.nMB1());
+	v_dtClusterMB2->push_back(cluster.nMB2());
+	v_dtClusterEta->push_back(cluster.eta());
+	v_dtClusterPhi->push_back(cluster.phi());
+    }
+    for (auto iterJet = jets->begin(); iterJet != jets->end(); ++iterJet) {
+	edm::Ref<vector<reco::CaloJet>> const caloJetRef(jets, std::distance(jets->begin(), iterJet));
+	if (iterJet->pt() > 15){
+	    v_caloJetHLTPt->push_back(iterJet->pt());
+	    v_caloJetHLTPhi->push_back(iterJet->phi());
+	    v_caloJetHLTEta->push_back(iterJet->eta());
+	    v_caloJetHLTE->push_back(iterJet->energy());
+	    v_caloJetHLTEcalTime->push_back((jetTimes)[caloJetRef]);
+	    v_caloJetHLTEcalE->push_back((jetEm)[caloJetRef]);
+	    v_caloJetHLTEcalCells->push_back((jetCells)[caloJetRef]);
+	}
+    }
+    // for (uint ijet = 0; ijet < jets->size(); ijet++) {
+	// auto const& obj = jets->at(ijet);
+	// reco::CaloJetRef calojetref(jets, ijet);
+	// v_caloJetHLTPt->push_back(obj.pt());
+	// v_caloJetHLTPhi->push_back(obj.phi());
+	// v_caloJetHLTEta->push_back(obj.eta());
+	// v_caloJetHLTE->push_back(obj.energy());
+	// // v_caloJetHLTEcalTime->push_back((*jetTimes)[calojetref]);
+	// // v_caloJetHLTEcalE->push_back((*jetEm)[calojetref]);
+	// // v_caloJetHLTEcalCells->push_back((*jetCells)[calojetref]);
+    // }
+    timeTree->Fill();
+    // ijet = 0;
+    // if (true){ //triggerResults.isValid()) {
+	// // const edm::TriggerNames & triggerNames = iEvent.triggerNames(*triggerResults);
+	// // for (unsigned int i = 0; i < triggerResults->size(); ++i) {
+	// //     const auto &trigname = triggerNames.triggerName(i);
+	// //     if (trigname.find(triggerString_ + "_v") != std::string::npos) {
+	// // 	trigger   = triggerResults->accept(i);
+	// //     }
+	// //     if (triggerResults->accept(i)){
+	// //     // std::cout << trigname << " " << triggerResults->accept(i) << std::endl;
+	// //     }
+	// // }
+	// if (true){
+	// // if (trigger){
+	//     triggerFiredHist->Fill(1.5);
+	//     for (auto const& c : *jets) {
+	// 	reco::CaloJetRef calojetref(jets, ijet);
+	// 	timeHist->Fill((*jetTimes)[calojetref]);
+	// 	if (maxTime < (*jetTimes)[calojetref]) {
+	// 	    if (secondTime > -25) secondTime = maxTime;
+	// 	    maxTime = (*jetTimes)[calojetref];
+	// 	}
+	// 	else if (secondTime < (*jetTimes)[calojetref]){
+	// 	    secondTime = (*jetTimes)[calojetref];
+	// 	}
+	// 	if (c.energy()*c.energyFractionHadronic() > 20) {
+	// 	    timeHistHighHad->Fill((*jetTimes)[calojetref]);
+	// 	    if (maxTimeHad < (*jetTimes)[calojetref]) {
+	// 		if (secondTimeHad > -25) secondTimeHad = maxTimeHad;
+	// 		maxTimeHad = (*jetTimes)[calojetref];
+	// 	    }
+	// 	    else if (secondTimeHad < (*jetTimes)[calojetref]){
+	// 		secondTimeHad = (*jetTimes)[calojetref];
+	// 	    }
+	// 		
+	// 	}
+	// 	timeVsJetPtHist->Fill((*jetTimes)[calojetref],c.pt());
+	// 	timeVsJetEmHist->Fill((*jetTimes)[calojetref],(*jetEm)[calojetref]);
+	// 	timeVsJetCellsHist->Fill((*jetTimes)[calojetref],(*jetCells)[calojetref]);
+	// 	timeVsJetEtaHist->Fill((*jetTimes)[calojetref],c.eta());
+	// 	ijet++;
+	//     }
+	//     maxTimeHist->Fill(maxTime);
+	//     maxTimeHistHighHad->Fill(maxTimeHad);
+	//     secondTimeHist->Fill(secondTime);
+	//     secondTimeHistHighHad->Fill(secondTimeHad);
+	// }
+	// else{
+	//     triggerFiredHist->Fill(0.5);
+	// }
+    // }
 }
 
 // ------------ method fills 'descriptions' with the allowed parameters for the module  ------------
